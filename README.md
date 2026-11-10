@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/convrsi-logo.jpg" width="112" height="112" alt="ConvRSI logo">
+  <img src="./264091041.jfif" alt="openJiuwen Logo" width="180">
   <h1>ConvRSI</h1>
   <p><strong>Convolutional co-evolution for multi-agent language models</strong></p>
   <p>
