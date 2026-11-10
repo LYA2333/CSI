@@ -1,6 +1,6 @@
 <div align="center">
   <img src="./264091041.jfif" alt="openJiuwen Logo" width="180">
-  <h1>ConvRSI</h1>
+  <h1>OpenJiuwen</h1>
   <p><strong>Convolutional co-evolution for multi-agent language models</strong></p>
   <p>
     <a href="#model"><img src="https://img.shields.io/badge/ConvRSI-v3-5C3C97?style=flat-square" alt="ConvRSI v3"></a>
