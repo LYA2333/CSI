@@ -12,14 +12,19 @@
 
 ## Demo
 
-<!-- DEMO START. Replace this blank panel with the demo image, GIF, or video link. -->
-<table width="100%">
-  <tr>
-    <td align="center" width="100%" height="144">
-      &nbsp;<br><br><br><br><br>&nbsp;
-    </td>
-  </tr>
-</table>
+<!-- DEMO START -->
+
+<p align="center">
+  <a href="assets/CSI_demo.mp4">
+    <img src="assets/CSI_demo_preview.jpg" alt="Preview of the ConvRSI demo" width="760">
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/CSI_demo.mp4"><strong>Watch the ConvRSI demo (MP4)</strong></a> ·
+  <a href="CSI_demo.mov">Original recording (MOV)</a>
+</p>
+
 <!-- DEMO END -->
 
 ## Overview
@@ -73,6 +78,12 @@ Training rows contain `question`, `plan`, `refined_plan`, and `answer`. The trai
 
 ## Model
 
+<p align="center">
+  <img src="assets/framework.png" alt="ConvRSI framework with intra-agent convolution and recurrent graph message passing" width="850">
+</p>
+
+**ConvRSI framework.** Each agent convolves its feature slots into a local message. The GCN aggregates those messages across agents and feeds the updated messages into the next round.
+
 Each frozen backbone encodes task, role, system, and experience once per example in a system forward pass. A learned reader compresses each feature into **8 slots** by default. A fifth feature carries the recurrent message, which starts as a masked zero.
 
 - **Intra-agent Conv** projects the feature slots into a shared width and applies depthwise Conv1D along the feature axis, independently at each slot. Gated pooling produces the local messages.
@@ -93,6 +104,12 @@ Fresh training records `conv_pointwise=False`, `cross_feature_fusion=False`, and
 ```
 
 ## Training
+
+<p align="center">
+  <img src="assets/ConvRSI_overall_pipeline_final.png" alt="ConvRSI pipeline for parallel Inner training and graph-based Outer training" width="940">
+</p>
+
+**Two-stage training.** Inner training learns local prefixes independently for each agent. With GCN feedback, Outer training can prepare round-specific prefixes before collaboration and uses cross-entropy on the final output.
 
 With the model directories in place, train on Sequential-Math. The defaults run the three backbones and CSI modules on `cuda:0`.
 

@@ -1,0 +1,27 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+.venv/
+venv/
+
+# Local model downloads, raw datasets, and snapshots
+/pre-trained/
+/_backups/
+
+# Training and evaluation outputs
+runs/
+/csi_checkpoints*/
+/math500_csi_eval*/
+/math500_recursive/
+csi_*.pt
+csi_*.tmp
+*.log
+
+# Local environment settings and macOS metadata
+.vscode/
+.env
+.env.*
+!.env.example
+.DS_Store

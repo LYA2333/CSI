@@ -1,87 +1,137 @@
-"""A small prototype for CSI intra-agent Conv1D + inter-agent GCN updates.
-
-Tensor conventions
-------------------
-B: batch size
-N: number of agents
-K: number of feature types (task, role, experience, prompt, message)
-S: latent tokens per feature
-D: shared latent dimension
-
-This file intentionally does not depend on a particular LLM. In a real system,
-the feature encoders would turn text/KV/hidden states into tensors before this
-module, and ``SharedLatentAdapter`` would bridge each LLM's hidden dimension.
-"""
-
-from __future__ import annotations
-
+"""ConvRSI v3: configurable convolution padding and optional broadcast residual."""
 from typing import Sequence
-
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
 
 
-class SharedLatentAdapter(nn.Module):
-    """Project heterogeneous agent hidden states into one shared latent space."""
+def parse_conv_padding(value):
+    """CLI/config value: 'same' or a nonnegative symmetric integer padding."""
+    if isinstance(value, str) and value.strip().lower() == 'same':
+        return 'same'
+    if isinstance(value, bool):
+        raise ValueError('conv-padding must be same or a nonnegative integer')
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        try:
+            number = int(value)
+        except ValueError:
+            number = -1
+        if number >= 0:
+            return number
+    raise ValueError('conv-padding must be same or a nonnegative integer')
 
-    def __init__(self, agent_hidden_dims: Sequence[int], d_model: int) -> None:
-        super().__init__()
-        self.to_shared = nn.ModuleList(
-            nn.Linear(hidden_dim, d_model) for hidden_dim in agent_hidden_dims
-        )
-        self.from_shared = nn.ModuleList(
-            nn.Linear(d_model, hidden_dim) for hidden_dim in agent_hidden_dims
-        )
 
-    def encode(self, hidden_states: Sequence[Tensor]) -> Tensor:
-        """Return shared tokens with shape [B, N, S, D]."""
-        if len(hidden_states) != len(self.to_shared):
-            raise ValueError("Need one hidden-state tensor for every agent")
-        projected = [layer(h) for layer, h in zip(self.to_shared, hidden_states)]
-        return torch.stack(projected, dim=1)
+def conv_padding_sides(kernel_size, dilation, padding):
+    padding = parse_conv_padding(padding)
+    if kernel_size < 1 or dilation < 1:
+        raise ValueError('kernel_size and dilation must be positive')
+    if padding == 'same':
+        total = dilation * (kernel_size-1)
+        return total//2, total-total//2
+    return padding, padding
 
-    def decode(self, messages: Tensor) -> list[Tensor]:
-        """Map [B, N, D] messages back to each agent's input dimension."""
-        return [layer(messages[:, i]) for i, layer in enumerate(self.from_shared)]
+
+def validate_conv_layout(num_features, kernel_size, dilations, padding='same', residual=True):
+    """Validate each block's actual input length before loading the backbones."""
+    if not isinstance(residual, bool):
+        raise ValueError('conv-residual must be a boolean')
+    if num_features < 1 or kernel_size < 1:
+        raise ValueError('num_feature_types and kernel_size must be positive')
+    if not dilations or any(d < 1 for d in dilations):
+        raise ValueError('dilations must contain positive integers')
+    if any(d >= num_features for d in dilations):
+        raise ValueError(f'Each dilation must be smaller than the feature-axis length ({num_features})')
+    lengths = []
+    input_length = num_features
+    for index,dilation in enumerate(dilations):
+        left,right = conv_padding_sides(kernel_size,dilation,padding)
+        effective_kernel = dilation*(kernel_size-1)+1
+        length = input_length+left+right-effective_kernel+1
+        if length < 1:
+            raise ValueError(f'Conv block {index+1}: effective kernel {effective_kernel} exceeds padded '
+                             f'feature length {input_length+left+right}; adjust --kernel-size, --dilations or --conv-padding')
+        if residual and length not in (1,input_length):
+            raise ValueError(f'Conv block {index+1}: padding={padding!r}, kernel_size={kernel_size}, '
+                             f'dilation={dilation} gives {length} positions for {input_length} input features. '
+                             f'The preserved broadcast residual requires 1 or {input_length} positions')
+        lengths.append(length)
+        if not residual:
+            input_length = length
+    return lengths
 
 
 class DilatedDepthwiseConvBlock(nn.Module):
-    """One residual depthwise-separable Conv1D block over an ordered axis."""
+    """Depthwise Conv1D, GELU and LayerNorm, with an optional input skip."""
 
-    def __init__(self, d_model: int, kernel_size: int, dilation: int) -> None:
+    def __init__(self, d_model: int, kernel_size: int, dilation: int, padding='same',
+                 residual=True, *, pointwise=False) -> None:
         super().__init__()
-        if kernel_size % 2 == 0:
-            raise ValueError("kernel_size must be odd to preserve sequence length")
-        if dilation < 1:
-            raise ValueError("dilation must be positive")
-
-        padding = dilation * (kernel_size - 1) // 2
+        if not isinstance(residual, bool):
+            raise ValueError('conv-residual must be a boolean')
+        if not isinstance(pointwise, bool):
+            raise ValueError('conv_pointwise must be a boolean')
+        self.residual = residual
+        self.padding_mode = parse_conv_padding(padding)
+        left,right = conv_padding_sides(kernel_size,dilation,self.padding_mode)
+        self.padding_sides = (left,right)
+        self.explicit_padding = (left,right) if left != right else None
         self.depthwise = nn.Conv1d(
             d_model,
             d_model,
             kernel_size,
-            padding=padding,
+            padding=0 if self.explicit_padding is not None else left,
             dilation=dilation,
             groups=d_model,
         )
-        self.pointwise = nn.Conv1d(d_model, d_model, kernel_size=1)
+        # Legacy checkpoints used an additional 1x1 channel projection.
+        self.pointwise = nn.Conv1d(d_model, d_model, kernel_size=1) if pointwise else None
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, sequence: Tensor) -> Tensor:
         """Update a sequence with shape [batch, length, D]."""
         conv_input = sequence.transpose(1, 2)
-        conv_output = self.pointwise(F.gelu(self.depthwise(conv_input)))
-        return self.norm(sequence + conv_output.transpose(1, 2))
+        if self.explicit_padding is not None:
+            conv_input = F.pad(conv_input,self.explicit_padding)
+        conv_output = F.gelu(self.depthwise(conv_input))
+        if self.pointwise is not None:
+            conv_output = self.pointwise(conv_output)
+        if self.residual and conv_output.shape[-1] not in (1,sequence.shape[1]):
+            raise ValueError('Convolution output must have one position or match the input length '
+                             'for the preserved broadcast residual')
+        # A singleton convolution is intentionally broadcast to every original
+        # feature. Keep its original mask and gated pooling afterward.
+        output = conv_output.transpose(1, 2)
+        return self.norm(sequence + output if self.residual else output)
+
+    def output_mask(self, mask: Tensor) -> Tensor:
+        """A non-residual output is valid when its window reads any valid input.
+
+        Missing features and padding are not observations. In the residual path,
+        output positions retain the original feature identities and masks.
+        """
+        if self.residual:
+            return mask
+        left,right = self.padding_sides
+        windows = F.pad(mask[:, None].float(), (left,right))
+        kernel = windows.new_ones(1,1,self.depthwise.kernel_size[0])
+        counts = F.conv1d(windows, kernel, dilation=self.depthwise.dilation[0])
+        return counts[:, 0].gt(0)
 
 
 class IntraAgentConv(nn.Module):
-    """Fuse typed features inside each agent.
+    """Produce one agent's next message from K representations.
 
-    For every latent-token position, Conv1D runs along the ordered feature axis
-    K: task -> role -> experience -> prompt -> message. This makes feature
-    interaction an explicit part of every convolution block. The resulting
-    feature-token grid is fused afterwards by gated pooling.
+    Each feature keeps its identity until Conv1D mixes the ordered feature axis
+    K (experience CSI): task -> role -> system -> experience -> message;
+    legacy four-part CSI omits experience. With return_sequence,
+    the gated pool reduces K only, retaining masked messages [B,L,D]. The
+    legacy standalone demo defaults to pooling both K and L into [B,D].
+
+    The module also accepts [B, N, K, S, D] for standalone experiments, but a
+    :class:`CSIGCN` owns one independent instance per agent and calls each one
+    with [B, K, S, D].
     """
 
     def __init__(
@@ -90,19 +140,15 @@ class IntraAgentConv(nn.Module):
         num_feature_types: int = 5,
         kernel_size: int = 3,
         dilations: Sequence[int] = (1, 2),
+        padding='same',
+        residual=True,
+        cross_feature_fusion=False,
+        conv_pointwise=False,
     ) -> None:
         super().__init__()
-        if num_feature_types < 1:
-            raise ValueError("num_feature_types must be positive")
-        if kernel_size % 2 == 0:
-            raise ValueError("kernel_size must be odd to preserve feature length")
-        if not dilations or any(dilation < 1 for dilation in dilations):
-            raise ValueError("dilations must contain positive integers")
-        if any(dilation >= num_feature_types for dilation in dilations):
-            raise ValueError(
-                "Each dilation must be smaller than the feature-axis length "
-                f"({num_feature_types}); larger values only convolve padding"
-            )
+        self.conv_padding = parse_conv_padding(padding)
+        self.conv_residual = residual
+        self.conv_output_lengths = validate_conv_layout(num_feature_types,kernel_size,dilations,self.conv_padding,residual)
 
         self.num_feature_types = num_feature_types
         self.kernel_size = kernel_size
@@ -113,11 +159,21 @@ class IntraAgentConv(nn.Module):
             self.theoretical_receptive_field,
         )
         self.conv_axis = "feature_types"
+        if not isinstance(cross_feature_fusion, bool):
+            raise ValueError('cross_feature_fusion must be a boolean')
+        self.cross_feature_fusion = cross_feature_fusion
+        # Only historical checkpoints own the flattened all-feature FC.
+        # Fresh models have neither its parameters nor its forward computation.
+        if cross_feature_fusion:
+            fusion_width = num_feature_types * d_model
+            self.fusion_norm = nn.LayerNorm(fusion_width)
+            self.feature_fusion = nn.Linear(fusion_width, fusion_width)
         self.type_embedding = nn.Parameter(
             torch.randn(num_feature_types, 1, d_model) * 0.02
         )
         self.conv_blocks = nn.ModuleList(
-            DilatedDepthwiseConvBlock(d_model, kernel_size, dilation)
+            DilatedDepthwiseConvBlock(d_model, kernel_size, dilation, self.conv_padding, residual,
+                                      pointwise=conv_pointwise)
             for dilation in self.dilations
         )
         self.pool_gate = nn.Linear(d_model, 1)
@@ -127,34 +183,101 @@ class IntraAgentConv(nn.Module):
             nn.Linear(2 * d_model, d_model),
         )
 
-    def forward(self, features: Tensor) -> Tensor:
-        """Convert [B, N, K, S, D] features to [B, N, D] local states."""
+    def forward(
+        self, features: Tensor, *, return_sequence: bool = False,
+        token_mask: Tensor | None = None,
+        feature_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Mix feature types; optionally retain the masked token sequence."""
+        single_agent = features.ndim == 4
+        if single_agent:
+            features = features.unsqueeze(1)
+        if features.ndim != 5:
+            raise ValueError(
+                "features must have shape [B,K,S,D] or [B,N,K,S,D]"
+            )
         batch, agents, feature_types, tokens, d_model = features.shape
         if feature_types != self.num_feature_types:
             raise ValueError(
                 f"Expected {self.num_feature_types} feature types, got {feature_types}"
             )
 
-        x = features + self.type_embedding.view(1, 1, feature_types, 1, d_model)
-        # Preserve each latent-token index and expose the five feature types as
+        valid_features = None
+        if feature_mask is not None:
+            valid_features = feature_mask.unsqueeze(1) if single_agent else feature_mask
+            if tuple(valid_features.shape) != (batch, agents, feature_types, tokens):
+                raise ValueError("feature_mask must match [B,K,L] or [B,N,K,L]")
+            valid_features = valid_features.to(device=features.device, dtype=torch.bool)
+            features = features * valid_features.unsqueeze(-1)
+
+        x = features
+        if self.cross_feature_fusion:
+            # Restore the original dense mixing exactly for old checkpoints.
+            flattened = features.permute(0, 1, 3, 2, 4).contiguous().reshape(
+                batch, agents, tokens, feature_types * d_model)
+            fused = flattened + F.gelu(self.feature_fusion(self.fusion_norm(flattened)))
+            x = fused.reshape(batch, agents, tokens, feature_types, d_model)
+            x = x.permute(0, 1, 3, 2, 4).contiguous()
+        x = x + self.type_embedding.view(1, 1, feature_types, 1, d_model)
+        if valid_features is not None:
+            x = x * valid_features.unsqueeze(-1)
+        # Preserve each latent-token index and expose the K feature types as
         # the Conv1D sequence: [B,N,K,S,D] -> [B*N*S,K,D].
         x = x.permute(0, 1, 3, 2, 4).contiguous()
         x = x.reshape(batch * agents * tokens, feature_types, d_model)
+        conv_mask = (None if valid_features is None else
+                     valid_features.permute(0, 1, 3, 2).reshape(-1, feature_types))
+        if conv_mask is None and not self.conv_residual:
+            conv_mask = torch.ones(x.shape[:2], device=x.device, dtype=torch.bool)
 
         # Each block now mixes neighbouring feature types rather than
         # neighbouring latent-token positions.
         for block in self.conv_blocks:
             x = block(x)
+            if conv_mask is not None:
+                conv_mask = block.output_mask(conv_mask)
+                x = x * conv_mask.unsqueeze(-1)
 
-        x = x.reshape(batch, agents, tokens, feature_types, d_model)
+        output_features = x.shape[1]
+        x = x.reshape(batch, agents, tokens, output_features, d_model)
+        pool_mask = (None if conv_mask is None else
+                     conv_mask.reshape(batch, agents, tokens, output_features))
+        if return_sequence:
+            # Pool only K. Never pool away the L axis of a real message.
+            scores = self.pool_gate(x).squeeze(-1)
+            if pool_mask is not None:
+                scores = scores.masked_fill(~pool_mask, torch.finfo(scores.dtype).min)
+            weights = torch.softmax(scores, dim=-1)
+            if pool_mask is not None:
+                weights = weights * pool_mask
+            pooled = (weights.unsqueeze(-1) * x).sum(dim=3)
+            message = pooled + self.output(pooled)
+            if pool_mask is not None:
+                message = message * pool_mask.any(dim=-1).unsqueeze(-1)
+            if token_mask is not None:
+                mask = token_mask.unsqueeze(1) if single_agent else token_mask
+                if tuple(mask.shape) != (batch, agents, tokens):
+                    raise ValueError("token_mask must match the message token axes")
+                message = message * mask.to(message.device).unsqueeze(-1)
+            return message[:, 0] if single_agent else message
         x = x.permute(0, 1, 3, 2, 4).contiguous()
 
         # Learn which mixed feature/token positions matter for the current
         # agent and task.
-        x = x.reshape(batch, agents, feature_types * tokens, d_model)
-        weights = torch.softmax(self.pool_gate(x).squeeze(-1), dim=-1)
+        x = x.reshape(batch, agents, output_features * tokens, d_model)
+        scores = self.pool_gate(x).squeeze(-1)
+        flat_mask = (None if pool_mask is None else
+                     pool_mask.permute(0,1,3,2).reshape(batch, agents, -1))
+        if flat_mask is not None:
+            scores = scores.masked_fill(~flat_mask, torch.finfo(scores.dtype).min)
+        weights = torch.softmax(scores, dim=-1)
+        if flat_mask is not None:
+            weights = weights * flat_mask
         pooled = torch.sum(weights.unsqueeze(-1) * x, dim=2)
-        return pooled + self.output(pooled)
+        message = pooled + self.output(pooled)
+        if flat_mask is not None:
+            message = message * flat_mask.any(-1).unsqueeze(-1)
+        return message[:, 0] if single_agent else message
 
 
 class GraphConvolutionUpdate(nn.Module):
@@ -165,8 +288,12 @@ class GraphConvolutionUpdate(nn.Module):
     When it is omitted, every agent communicates with every other agent.
     """
 
-    def __init__(self, d_model: int) -> None:
+    def __init__(self, d_model: int, *, residual: bool = False) -> None:
         super().__init__()
+        if not isinstance(residual, bool):
+            raise ValueError('gcn_residual must be a boolean')
+        # The input skip is restored only when loading a legacy configuration.
+        self.residual = residual
         self.projection = nn.Linear(d_model, d_model, bias=False)
         self.bias = nn.Parameter(torch.zeros(d_model))
         self.norm = nn.LayerNorm(d_model)
@@ -179,8 +306,9 @@ class GraphConvolutionUpdate(nn.Module):
         num_agents: int,
         device: torch.device,
         dtype: torch.dtype,
+        node_mask: Tensor | None = None,
     ) -> Tensor:
-        """Return D^-1/2 (A + I) D^-1/2 with shape [B, N, N]."""
+        """Return normalized [B,N,N], or active-token graphs [B,L,N,N]."""
         if adjacency is None:
             # The diagonal is removed here because self-loops are added below.
             adjacency = torch.ones(num_agents, num_agents, device=device, dtype=dtype)
@@ -203,7 +331,19 @@ class GraphConvolutionUpdate(nn.Module):
 
         identity = torch.eye(num_agents, device=device, dtype=dtype).unsqueeze(0)
         adjacency_with_self_loops = adjacency + identity
-        degree = adjacency_with_self_loops.sum(dim=-1).clamp_min(1e-12)
+        if node_mask is not None:
+            if node_mask.ndim != 3 or tuple(node_mask.shape[:2]) != (batch_size, num_agents):
+                raise ValueError("node_mask must have shape [B,N,L]")
+            valid = node_mask.to(device=device, dtype=dtype).transpose(1, 2)
+            # [B,L,N,N]: padded senders/receivers are not graph nodes, and
+            # normalization uses the active graph at each token position.
+            adjacency_with_self_loops = (
+                adjacency_with_self_loops[:, None]
+                * valid.unsqueeze(-1) * valid.unsqueeze(-2)
+            )
+        # Valid nodes have a self-loop (degree >= 1); invalid nodes have degree
+        # zero. Clamp to 1 so even float16 avoids inf * 0 on padded positions.
+        degree = adjacency_with_self_loops.sum(dim=-1).clamp_min(1)
         inverse_sqrt_degree = degree.rsqrt()
         return (
             inverse_sqrt_degree.unsqueeze(-1)
@@ -215,159 +355,39 @@ class GraphConvolutionUpdate(nn.Module):
         self,
         node_states: Tensor,
         adjacency: Tensor | None = None,
+        *,
+        node_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
-        """Update [B, N, D] node states and return normalized [B, N, N] A."""
-        batch_size, num_agents, _ = node_states.shape
+        """Update vectors or masked [B,N,L,D] sequences at each token position."""
+        if node_states.ndim not in (3, 4):
+            raise ValueError("node_states must have shape [B,N,D] or [B,N,L,D]")
+        batch_size, num_agents = node_states.shape[:2]
+        if node_states.ndim == 4:
+            if node_mask is None:
+                node_mask = torch.ones(node_states.shape[:-1], device=node_states.device, dtype=torch.bool)
+            if tuple(node_mask.shape) != tuple(node_states.shape[:-1]):
+                raise ValueError("node_mask must match [B,N,L]")
+        elif node_mask is not None:
+            raise ValueError("node_mask is only used by sequence node_states")
         normalized_adjacency = self.normalize_adjacency(
             adjacency,
             batch_size=batch_size,
             num_agents=num_agents,
             device=node_states.device,
             dtype=node_states.dtype,
+            node_mask=node_mask,
         )
 
         transformed = self.projection(node_states)
-        propagated = torch.matmul(normalized_adjacency, transformed) + self.bias
+        if node_states.ndim == 4:
+            transformed = transformed * node_mask.to(node_states.device).unsqueeze(-1)
+            propagated = torch.matmul(normalized_adjacency, transformed.transpose(1, 2)).transpose(1, 2) + self.bias
+        else:
+            propagated = torch.matmul(normalized_adjacency, transformed) + self.bias
 
-        # A residual connection mitigates over-smoothing across repeated rounds.
-        updated = self.norm(node_states + F.gelu(propagated))
+        activated = F.gelu(propagated)
+        updated = self.norm(node_states + activated if self.residual else activated)
+        if node_mask is not None:
+            updated = updated * node_mask.to(node_states.device).unsqueeze(-1)
         return updated, normalized_adjacency
 
-
-class CSIGCN(nn.Module):
-    """Alternate CSI intra-agent Conv1D and inter-agent GCN updates."""
-
-    def __init__(
-        self,
-        d_model: int,
-        num_static_features: int = 4,
-        kernel_size: int = 3,
-        dilations: Sequence[int] = (1, 2),
-    ) -> None:
-        super().__init__()
-        # Static features + the evolving message feature.
-        self.num_static_features = num_static_features
-        self.intra = IntraAgentConv(
-            d_model,
-            num_static_features + 1,
-            kernel_size=kernel_size,
-            dilations=dilations,
-        )
-        self.inter = GraphConvolutionUpdate(d_model)
-
-    def forward(
-        self,
-        static_features: Tensor,
-        initial_messages: Tensor | None = None,
-        max_steps: int = 4,
-        tolerance: float = 1e-3,
-        adjacency: Tensor | None = None,
-    ) -> dict[str, Tensor | int | list[Tensor]]:
-        """Run recursive updates.
-
-        ``static_features`` has shape [B, N, 4, S, D]. During training all
-        ``max_steps`` are unrolled. During evaluation, inference stops early
-        when every message changes less than ``tolerance``.
-        """
-        batch, agents, feature_types, latent_tokens, d_model = static_features.shape
-        if feature_types != self.num_static_features:
-            raise ValueError(
-                f"Expected {self.num_static_features} static features, got {feature_types}"
-            )
-        if max_steps < 1:
-            raise ValueError("max_steps must be at least 1")
-
-        if initial_messages is None:
-            messages = static_features.new_zeros(batch, agents, d_model)
-        else:
-            messages = initial_messages
-
-        normalized_adjacency = static_features.new_zeros(batch, agents, agents)
-        relative_change = static_features.new_full((batch, agents), float("inf"))
-        message_history: list[Tensor] = []
-
-        for step in range(1, max_steps + 1):
-            message_tokens = messages[:, :, None, None, :].expand(
-                -1, -1, 1, latent_tokens, -1
-            )
-            all_features = torch.cat([static_features, message_tokens], dim=2)
-            local_states = self.intra(all_features)
-            updated, normalized_adjacency = self.inter(local_states, adjacency)
-
-            relative_change = (updated - messages).norm(dim=-1) / (
-                messages.norm(dim=-1) + 1e-6
-            )
-            messages = updated
-            message_history.append(messages)
-
-            # The hard stopping decision is used only for inference. Training
-            # keeps a fixed differentiable unroll; ACT could replace this later.
-            if not self.training and torch.all(relative_change < tolerance).item():
-                break
-
-        return {
-            "messages": messages,
-            "message_history": message_history,
-            "adjacency": normalized_adjacency,
-            "relative_change": relative_change,
-            "steps": step,
-        }
-
-
-# Backward-compatible alias for earlier experiments that imported this name.
-ConvGraphMAS = CSIGCN
-
-
-def demo() -> None:
-    """Run one optimization step and one adaptive inference pass."""
-    torch.manual_seed(7)
-    batch, agents, features, tokens, d_model = 3, 3, 4, 32, 32
-
-    # These stand in for encoded task, role, experience, and prompt tokens.
-    static_features = torch.randn(batch, agents, features, tokens, d_model)
-    targets = torch.tensor([0, 2, 1])
-    collaboration_graph = torch.tensor(
-        [
-            [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ]
-    )
-
-    model = CSIGCN(d_model=d_model)
-    answer_head = nn.Linear(d_model, 3)
-    optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(answer_head.parameters()), lr=3e-4
-    )
-
-    model.train()
-    output = model(static_features, max_steps=4, adjacency=collaboration_graph)
-    executor_message = output["messages"][:, -1]  # Agent 3 is the executor.
-    loss = F.cross_entropy(answer_head(executor_message), targets)
-    optimizer.zero_grad()
-    loss.backward()
-    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    optimizer.step()
-
-    print(f"training loss: {loss.item():.4f}")
-    print(
-        "intra-agent feature-axis dilations / effective receptive field: "
-        f"{model.intra.dilations} / {model.intra.receptive_field}"
-    )
-    print("normalized GCN graph for sample 0 (row=receiver, col=sender):")
-    print(output["adjacency"][0].detach().round(decimals=3))
-
-    model.eval()
-    with torch.no_grad():
-        inference = model(
-            static_features,
-            max_steps=8,
-            tolerance=5e-2,
-            adjacency=collaboration_graph,
-        )
-    print(f"inference steps: {inference['steps']}")
-    print(f"max relative change: {inference['relative_change'].max().item():.4f}")
-
-
-if __name__ == "__main__":
-    demo()
