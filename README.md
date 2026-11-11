@@ -14,15 +14,7 @@
 
 <!-- DEMO START -->
 
-<p align="center">
-  <a href="CSI_demo.mov">
-    <img src="assets/CSI_demo_preview.jpg" alt="Preview of the ConvRSI demo" width="760">
-  </a>
-</p>
-
-<p align="center">
-  <a href="CSI_demo.mov"><strong>Watch the ConvRSI demo (MOV)</strong></a>
-</p>
+https://github.com/LYA2333/assets/CSI_demo.mov
 
 <!-- DEMO END -->
 
