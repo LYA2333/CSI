@@ -42,7 +42,7 @@ Select the topology with `--mas-system` or its alias `--multi-agent-system`.
 
 | Style | Training flag | Agent schedule | GCN graph | Final answer |
 | --- | --- | --- | --- | --- |
-| **Sequential** | `--mas-system sequential` (default) | Planner → Critic → Solver | Directed chain | Solver |
+| **Sequential** | `--mas-system sequential` | Planner → Critic → Solver | Directed chain | Solver |
 | **Mixture** | `--mas-system mixture` | Math, Code, and Science Experts → Summarizer | Bidirectional star | Summarizer |
 
 In **Sequential**, the Solver sends latent feedback to the next round's Planner through an OuterLink. In **Mixture**, the Summarizer reads three separate expert inputs and sends each expert its own latent feedback for the next round. Both graphs include normalized self-loops.
@@ -75,11 +75,11 @@ Place the Sequential model files in the listed directories or set their `--<role
 
 ## Datasets
 
-| Dataset | Use | Local file |
-| --- | --- | --- |
-| Sequential-Math | Sequential training (1,904 rows) | [Bundled Parquet](datasets/Sequential-Math/data/train-00000-of-00001.parquet) |
-| Mixture-Outer | Mixture training | `datasets/Mixture-Outer/data/train-00000-of-00001.parquet` (download below) |
-| MATH-500 | Math evaluation for either style (500 rows) | [Bundled JSONL](datasets/MATH-500/test.jsonl) |
+| Dataset | Use |
+| --- | --- |
+| Sequential-Math | Sequential training (1,904 rows) |
+| Mixture-Outer | Mixture training |
+| MATH-500 | Math evaluation for either style (500 rows) |
 
 Download the Mixture training file to the path used in the training example. [Mixture-Outer dataset](https://huggingface.co/datasets/RecursiveMAS/Mixture-Outer)
 
