@@ -3,10 +3,10 @@
   <h1>OpenJiuwen</h1>
   <p><strong>Convolutional co-evolution for multi-agent language models</strong></p>
   <p>
-    <a href="#model"><img src="https://img.shields.io/badge/ConvRSI-v3-5C3C97?style=flat-square" alt="ConvRSI v3"></a>
+    <a href="#collaboration-styles"><img src="https://img.shields.io/badge/ConvRSI-Sequential%20%2B%20Mixture-5C3C97?style=flat-square" alt="Sequential and Mixture collaboration styles"></a>
     <a href="requirements.txt"><img src="https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?style=flat-square&amp;logo=pytorch&amp;logoColor=white" alt="PyTorch 2.9.0"></a>
     <a href="requirements.txt"><img src="https://img.shields.io/badge/Transformers-5.3.0-AD861F?style=flat-square" alt="Transformers 5.3.0"></a>
-    <a href="#evaluation"><img src="https://img.shields.io/badge/Evaluation-MATH--500-146C5E?style=flat-square" alt="MATH-500 evaluation"></a>
+    <a href="#evaluation-and-inference"><img src="https://img.shields.io/badge/Evaluation-MATH--500-146C5E?style=flat-square" alt="MATH-500 evaluation"></a>
   </p>
 </div>
 
@@ -14,29 +14,39 @@
 
 <!-- DEMO START -->
 
-https://github.com/LYA2333/assets/CSI_demo.mov
+https://github.com/LYA2333/CSI/assets/CSI_demo.mov
 
 <!-- DEMO END -->
 
 ## Overview
 
-**ConvRSI** gives each frozen language-model agent a continuous representation that evolves over multiple rounds of collaboration. Intra-agent convolution combines the features available to each agent. A graph convolution updates their messages jointly, and a learned projection turns the messages into soft prefixes for the language models.
-
-This v3 checkout includes two-stage training, single-question inference, and batched MATH-500 evaluation. Its reference configuration runs Planner, Critic, and Solver agents in a sequential math workflow.
+**ConvRSI** coordinates frozen language-model agents through learned soft prefixes. Each agent combines its feature slots with a local convolution, and a graph convolution updates the messages across agents. This repository supports **Sequential** and **Mixture** collaboration for two-stage training, MATH-500 evaluation, and single-question math inference.
 
 ## Table of contents
 
+- [Collaboration styles](#collaboration-styles)
 - [Installation](#installation)
 - [Datasets](#datasets)
 - [Model](#model)
 - [Training](#training)
-- [Evaluation](#evaluation)
+- [Evaluation and inference](#evaluation-and-inference)
 - [Acknowledgements](#acknowledgements)
 - [Third-party licenses](#third-party-licenses)
 
+## Collaboration styles
+
+Select the topology with `--mas-system` or its alias `--multi-agent-system`.
+
+| Style | Training flag | Agent schedule | GCN graph | Final answer |
+| --- | --- | --- | --- | --- |
+| **Sequential** | `--mas-system sequential` (default) | Planner → Critic → Solver | Directed chain | Solver |
+| **Mixture** | `--mas-system mixture` | Math, Code, and Science Experts → Summarizer | Bidirectional star | Summarizer |
+
+In **Sequential**, the Solver sends latent feedback to the next round's Planner through an OuterLink. In **Mixture**, the Summarizer reads three separate expert inputs and sends each expert its own latent feedback for the next round. Both graphs include normalized self-loops.
+
 ## Installation
 
-Run the following commands from the v3 project directory.
+Run the commands from the repository root.
 
 ```bash
 conda create -n convrsi python=3.10 -y
@@ -44,28 +54,49 @@ conda activate convrsi
 python -m pip install -r requirements.txt
 ```
 
-The example uses a CUDA device with BF16 support. The trainer also supports `--model-dtype float32`.
+The training defaults place all active agents and ConvRSI modules on `cuda:0` and load the backbones in BF16. Use `--<role>-device` and `--csi-device` to change placement, and `--model-dtype float32` on devices that require FP32.
 
 ### Backbone weights
 
-Place the pretrained model files in the directories below. The evaluator and single-question runner can restore these paths from a training checkpoint.
+| Style | Agent | CLI role | Default path or Hugging Face model ID |
+| --- | --- | --- | --- |
+| Sequential | Planner | `planner` | `pre-trained/Qwen3-1.7B` |
+| Sequential | Critic | `critic` | `pre-trained/Llama-3.2-1B-Instruct` |
+| Sequential | Solver | `executor` | `pre-trained/Qwen2.5-Math-1.5B-Instruct` |
+| Mixture | Math Expert | `math-expert` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
+| Mixture | Code Expert | `code-expert` | `Qwen/Qwen2.5-Coder-3B-Instruct` |
+| Mixture | Science Expert | `science-expert` | `BioMistral/BioMistral-7B` |
+| Mixture | Summarizer | `summarizer` | `Qwen/Qwen3.5-2B` |
 
-| Agent | Model | Default local directory |
-| --- | --- | --- |
-| Planner | [Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) | `pre-trained/Qwen3-1.7B` |
-| Critic | [Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) | `pre-trained/Llama-3.2-1B-Instruct` |
-| Solver | [Qwen2.5-Math-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Math-1.5B-Instruct) | `pre-trained/Qwen2.5-Math-1.5B-Instruct` |
-
-To point at another location, pass `--planner-model-path`, `--critic-model-path`, or `--executor-model-path`. The CLI uses `executor` for the Solver.
+Place the Sequential model files in the listed directories or set their `--<role>-model-path` flags. Mixture defaults to Hub model IDs and accepts local model directories through the same flags, such as `--science-expert-model-path` and `--summarizer-model-path`.
 
 ## Datasets
 
-| Split | Records | Local file |
-| --- | ---: | --- |
-| Sequential-Math training | 1,904 | [`data/sequential_math.jsonl`](data/sequential_math.jsonl) |
-| MATH-500 test | 500 | [`data/math500.jsonl`](data/math500.jsonl) |
+| Dataset | Use | Local file |
+| --- | --- | --- |
+| Sequential-Math | Sequential training (1,904 rows) | [Bundled Parquet](datasets/Sequential-Math/data/train-00000-of-00001.parquet) |
+| Mixture-Outer | Mixture training | `datasets/Mixture-Outer/data/train-00000-of-00001.parquet` (download below) |
+| MATH-500 | Math evaluation for either style (500 rows) | [Bundled JSONL](datasets/MATH-500/test.jsonl) |
 
-Training rows contain `question`, `plan`, `refined_plan`, and `answer`. The training split removes six questions whose text exactly matches a MATH-500 question after case folding and whitespace removal. Evaluation supplies only the question to the model and uses the reference answer for grading. [Dataset provenance](data/README.md)
+Download the Mixture training file to the path used in the training example. [Mixture-Outer dataset](https://huggingface.co/datasets/RecursiveMAS/Mixture-Outer)
+
+```bash
+python - <<'PY'
+from huggingface_hub import hf_hub_download
+
+hf_hub_download(
+    repo_id="RecursiveMAS/Mixture-Outer",
+    filename="data/train-00000-of-00001.parquet",
+    repo_type="dataset",
+    local_dir="datasets/Mixture-Outer",
+)
+PY
+```
+
+- **Sequential** rows provide `question`, `plan`, `refined_plan`, and `answer`. The bundled file is the original split and includes six exact matches with MATH-500 after normalizing case and whitespace.
+- **Mixture** rows provide `question`, `hie_math_expert`, `hie_code_expert`, `hie_science_expert`, and a Summarizer target in `answer` or `hie_summarizer`. The prompt families are `math`, `choice`, and `code`.
+
+Use `--train-parquet` or `--train-jsonl` to pass the training split explicitly. Each packed sequence must fit the backbone context and the selected `--inner-max-length` or `--max-length` budget. That length includes the prompt, soft prefix, incoming latent states, and reference tokens.
 
 ## Model
 
@@ -73,26 +104,12 @@ Training rows contain `question`, `plan`, `refined_plan`, and `answer`. The trai
   <img src="assets/framework.png" alt="ConvRSI framework with intra-agent convolution and recurrent graph message passing" width="850">
 </p>
 
-**ConvRSI framework.** Each agent convolves its feature slots into a local message. The GCN aggregates those messages across agents and feeds the updated messages into the next round.
+**ConvRSI framework.** The figure shows the Sequential roles. Both styles use the same local convolution and graph update with their respective communication graphs.
 
-Each frozen backbone encodes task, role, system, and experience once per example in a system forward pass. A learned reader compresses each feature into **8 slots** by default. A fifth feature carries the recurrent message, which starts as a masked zero.
-
-- **Intra-agent Conv** projects the feature slots into a shared width and applies depthwise Conv1D along the feature axis, independently at each slot. Gated pooling produces the local messages.
-- **Inter-agent GCN** aggregates local messages across agents at each slot using a graph with normalized self-loops. Its output supplies both the current round’s soft prefix and the next round’s message.
-- **Latent collaboration** transfers agent execution states through a separate link path. The v3 trainer interleaves one Conv–GCN update with one Planner → Critic → Solver pass per round. Each intermediate Solver sends latent feedback to the next round's Planner.
-
-Fresh training records `conv_pointwise=False`, `cross_feature_fusion=False`, and `gcn_residual=False`. The convolution block has its own residual switch.
-
-```text
-.
-├── csi_qwen.py              # Frozen backbones, slot encoding, and multi-round execution
-├── conv_graph_mas_demo.py   # Intra-agent convolution and graph convolution
-├── train_csi.py             # Inner and Outer training
-├── evaluate_math500_csi.py  # Batched evaluation and answer grading
-├── ours_runner.py           # Single-question inference
-├── data/                    # Prepared training and evaluation splits
-└── vendor/recursivemas/      # Vendored prompts and latent-link components
-```
+- **Feature slots.** The frozen backbones encode task, role, system, and experience features once per example in a system forward pass. The default slot reader produces eight slots per feature. The recurrent message starts as a masked zero.
+- **Intra-agent Conv.** Depthwise Conv1D mixes feature types independently at each slot. Gated pooling produces each agent's local message.
+- **Inter-agent GCN.** The graph aggregates local messages at each slot. With the default GCN feedback, the updated messages supply the current soft prefixes and the next round's message features.
+- **Latent collaboration.** InnerLinks and OuterLinks map execution states between agent invocations. The collaboration schedule determines where each latent sequence is consumed.
 
 ## Training
 
@@ -100,89 +117,107 @@ Fresh training records `conv_pointwise=False`, `cross_feature_fusion=False`, and
   <img src="assets/ConvRSI_overall_pipeline_final.png" alt="ConvRSI pipeline for parallel Inner training and graph-based Outer training" width="940">
 </p>
 
-**Two-stage training.** Inner training learns local prefixes independently for each agent. With GCN feedback, Outer training can prepare round-specific prefixes before collaboration and uses cross-entropy on the final output.
+**Two-stage training.** The Inner panel illustrates the optional local cross-entropy objective. The Outer panel shows how GCN feedback allows round prefixes to be precomputed. The training entry point executes Conv–GCN followed by agent collaboration in each round.
 
-With the model directories in place, train on Sequential-Math. The defaults run the three backbones and CSI modules on `cuda:0`.
-
-```bash
-python train_csi.py \
-  --train-jsonl data/sequential_math.jsonl \
-  --inner-epochs 1 --epochs 3 \
-  --inner-batch-size 2 --batch-size 2 \
-  --max-steps 3 \
-  --output-dir runs/convrsi_v3
-```
-
-| Stage | Objective | Trainable components |
+| Stage | Objective | Updated modules |
 | --- | --- | --- |
-| **Inner** | Per-agent token CE and cosine alignment on detached hidden states | Local CSI modules via CE and InnerLinks via alignment |
-| **Outer** | Teacher-forced collaboration with token CE on the final Solver answer | Local CSI modules, GCN, and OuterLinks |
+| **Inner** | Cosine alignment between transformed detached hidden states and reference-token embeddings by default. Set `--inner-ce-weight 1` to add local token cross-entropy. | InnerLinks for alignment. Local CSI modules receive gradients from the optional CE term. |
+| **Outer** | Teacher-forced collaboration with token cross-entropy on the final-round Solver or Summarizer answer. | Local CSI modules, GCN, and OuterLinks. |
 
-Use `--inner-parallel` to run the independent Inner objectives concurrently. The device flags `--planner-device`, `--critic-device`, `--executor-device`, and `--csi-device` control placement.
+Use `--inner-parallel` to train the independent Inner agents concurrently.
 
-<details>
-<summary><strong>Run a short training smoke test</strong></summary>
+### Sequential training
 
 ```bash
 python train_csi.py \
-  --train-jsonl data/sequential_math_canary.jsonl \
-  --inner-batch-size 1 --batch-size 1 \
-  --inner-max-updates 2 --max-updates 2 \
-  --output-dir runs/convrsi_canary
+  --mas-system sequential \
+  --train-parquet datasets/Sequential-Math/data/train-00000-of-00001.parquet \
+  --inner-epochs 1 --epochs 1 \
+  --inner-max-length 4096 \
+  --inner-batch-size 2 --batch-size 2 \
+  --output-dir runs/sequential
 ```
 
-</details>
+### Mixture training
 
-### Configuration
+```bash
+python train_csi.py \
+  --mas-system mixture \
+  --train-parquet datasets/Mixture-Outer/data/train-00000-of-00001.parquet \
+  --inner-epochs 1 --epochs 1 \
+  --inner-max-length 4096 \
+  --inner-batch-size 1 --batch-size 1 \
+  --output-dir runs/mixture
+```
 
-| Flag | Default | Controls |
-| --- | ---: | --- |
-| `--max-steps` | 3 | Complete Conv–GCN and collaboration rounds |
-| `--csi-prefix-tokens` | 8 | Continuous CSI slots per feature and soft prefix |
+### Common settings
+
+| Flag | Training default | Controls |
+| --- | --- | --- |
+| `--max-steps` | 3 | Number of Conv–GCN and collaboration rounds |
+| `--csi-prefix-tokens` | 8 | Continuous slots per feature and per CSI soft prefix |
 | `--d-model` | 512 | Shared convolution and graph width |
-| `--max-prefix-tokens` | 80 | Maximum number of transferred latent positions in Outer training |
-| `--latent-length` | 32 | Latent rollout steps per non-final agent invocation during inference |
+| `--max-feature-tokens` | 1024 | Token limit for each static feature input |
+| `--max-prefix-tokens` | 80 | Maximum latent positions per transfer during Outer training |
+| `--latent-length` | 32 | Latent rollout steps per intermediate invocation at inference |
+
+To enable validation during Outer training, use `--outer-validation --validation-jsonl` with the path to your validation file.
 
 ### Checkpoints
 
-The run directory contains `csi_latest.pt`, completed Outer epoch checkpoints, `csi_final.pt`, and `token_usage.json`.
+Each run writes `csi_latest.pt`, `csi_outer_epoch_*.pt`, `csi_final.pt`, and `token_usage.json`.
 
 | Flag | Use |
 | --- | --- |
-| `--resume` | Continue a matching run with its optimizer, scheduler, and progress state. |
-| `--init-checkpoint` | Start a new run from compatible weights with fresh optimizer and scheduler state. |
-| `--checkpoint-path` | Load a trained run for evaluation or inference. |
+| `--resume` | Continue a matching run with its optimizer, scheduler, and progress. |
+| `--init-checkpoint` | Initialize a new run in the same topology from compatible weights with fresh training state. |
+| `--checkpoint-path` | Load a trained checkpoint for evaluation or inference. |
 
-Detailed options and checkpoint compatibility are covered in the [technical guide](CSI_QWEN_GUIDE.md).
+## Evaluation and inference
 
-## Evaluation
+The evaluator and single-question runner restore the topology from the checkpoint. An explicit `--mas-system` must match the saved topology. Intermediate agent invocations run in latent space. The final Solver or Summarizer decodes the text answer.
 
-Run MATH-500 with a trained checkpoint. Intermediate agents generate continuous latent states, and the final Solver decodes the answer.
+### MATH-500 evaluation
+
+Set `system` to `sequential` or `mixture` to select the matching run.
 
 ```bash
+system=mixture
 python evaluate_math500_csi.py \
-  --dataset-path data/math500.jsonl \
-  --checkpoint-path runs/convrsi_v3/csi_final.pt \
-  --output-dir runs/convrsi_v3_math500 \
-  --batch-size 4 --grader math_verify
+  --mas-system "$system" \
+  --dataset-path datasets/MATH-500/test.jsonl \
+  --checkpoint-path "runs/$system/csi_final.pt" \
+  --output-dir "runs/$system/math500" \
+  --batch-size 1 --grader math_verify
 ```
 
-The default `after` evaluation writes per-question records to `after_predictions.jsonl` and metrics to `after_predictions_summary.json` and `summary.json`. Use `--limit` to select a subset and `--batch-size` to set the number of questions processed together.
+The default `after` evaluation writes `after_predictions.jsonl`, `after_predictions_summary.json`, and `summary.json`. Use `--limit` to run on a subset.
 
 ### Single-question inference
 
+The same entry point accepts either style's checkpoint.
+
 ```bash
 python ours_runner.py \
-  --checkpoint-path runs/convrsi_v3/csi_final.pt \
+  --checkpoint-path runs/mixture/csi_final.pt \
   --question "Find the sum of the first 20 positive integers."
 ```
 
+### Shell launchers
+
+| Style | Training and evaluation | Evaluation only |
+| --- | --- | --- |
+| Sequential | [train.sh](train.sh) | [infer.sh](infer.sh) |
+| Mixture | [train_mixture.sh](train_mixture.sh) | [infer_mixture.sh](infer_mixture.sh) |
+
+The launchers contain machine-specific paths. Set `MODEL_DIR`, dataset and checkpoint paths, and the active agent devices for your environment. Create `logs/` and `test_logs/` before using the launchers. In `train_mixture.sh`, set `--train-parquet` to the downloaded shard or your prepared training file.
+
 ## Acknowledgements
 
-The v3 implementation uses prompts and latent-link components from RecursiveMAS. The vendored revision and local changes are recorded in the project provenance. [Upstream code](https://github.com/RecursiveMAS/RecursiveMAS) · [Vendor provenance](UPSTREAM.json)
+ConvRSI uses prompts and latent-link components from RecursiveMAS. [Upstream code](https://github.com/RecursiveMAS/RecursiveMAS)
 
-The training and test splits come from [Sequential-Math](https://huggingface.co/datasets/RecursiveMAS/Sequential-Math) and [MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500).
+The training and evaluation data come from RecursiveMAS and HuggingFaceH4. [Sequential-Math](https://huggingface.co/datasets/RecursiveMAS/Sequential-Math) · [Mixture-Outer](https://huggingface.co/datasets/RecursiveMAS/Mixture-Outer) · [MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500)
 
 ## Third-party licenses
 
-The vendored RecursiveMAS code and Sequential-Math data carry their respective MIT license notices. [RecursiveMAS license](vendor/recursivemas/LICENSE) · [Sequential-Math license](data/Sequential-Math-LICENSE)
+The vendored RecursiveMAS components carry their MIT license notice. [RecursiveMAS license](vendor/recursivemas/LICENSE)
