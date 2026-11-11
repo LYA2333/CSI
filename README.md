@@ -67,7 +67,6 @@ To point at another location, pass `--planner-model-path`, `--critic-model-path`
 | Split | Records | Local file |
 | --- | ---: | --- |
 | Sequential-Math training | 1,904 | [`data/sequential_math.jsonl`](data/sequential_math.jsonl) |
-| Training smoke test | 4 | [`data/sequential_math_canary.jsonl`](data/sequential_math_canary.jsonl) |
 | MATH-500 test | 500 | [`data/math500.jsonl`](data/math500.jsonl) |
 
 Training rows contain `question`, `plan`, `refined_plan`, and `answer`. The training split removes six questions whose text exactly matches a MATH-500 question after case folding and whitespace removal. Evaluation supplies only the question to the model and uses the reference answer for grading. [Dataset provenance](data/README.md)
