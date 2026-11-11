@@ -15,14 +15,13 @@
 <!-- DEMO START -->
 
 <p align="center">
-  <a href="assets/CSI_demo.mp4">
+  <a href="CSI_demo.mov">
     <img src="assets/CSI_demo_preview.jpg" alt="Preview of the ConvRSI demo" width="760">
   </a>
 </p>
 
 <p align="center">
-  <a href="assets/CSI_demo.mp4"><strong>Watch the ConvRSI demo (MP4)</strong></a> ·
-  <a href="CSI_demo.mov">Original recording (MOV)</a>
+  <a href="CSI_demo.mov"><strong>Watch the ConvRSI demo (MOV)</strong></a>
 </p>
 
 <!-- DEMO END -->
