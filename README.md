@@ -3,10 +3,8 @@
   <h1>OpenJiuwen</h1>
   <p><strong>Convolutional co-evolution for multi-agent language models</strong></p>
   <p>
-    <a href="#collaboration-styles"><img src="https://img.shields.io/badge/ConvRSI-Sequential%20%2B%20Mixture-5C3C97?style=flat-square" alt="Sequential and Mixture collaboration styles"></a>
-    <a href="requirements.txt"><img src="https://img.shields.io/badge/PyTorch-2.9.0-EE4C2C?style=flat-square&amp;logo=pytorch&amp;logoColor=white" alt="PyTorch 2.9.0"></a>
-    <a href="requirements.txt"><img src="https://img.shields.io/badge/Transformers-5.3.0-AD861F?style=flat-square" alt="Transformers 5.3.0"></a>
-    <a href="#evaluation-and-inference"><img src="https://img.shields.io/badge/Evaluation-MATH--500-146C5E?style=flat-square" alt="MATH-500 evaluation"></a>
+    <a href="https://github.com/LYA2333/CSI"><img src="https://img.shields.io/badge/GitHub-ConvCSI-181717?style=flat-square&amp;logo=github&amp;logoColor=white" alt="ConvCSI on GitHub"></a>
+    <a href="vendor/recursivemas/LICENSE" title="MIT license for vendored RecursiveMAS"><img src="https://img.shields.io/badge/License-MIT-2EA44F?style=flat-square" alt="MIT license for vendored RecursiveMAS"></a>
   </p>
 </div>
 
@@ -14,7 +12,6 @@
 
 <!-- DEMO START -->
 
-https://github.com/LYA2333/CSI/assets/CSI_demo.mov
 
 <!-- DEMO END -->
 
